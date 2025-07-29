@@ -30,8 +30,35 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // Validate API key format
+    if (typeof process.env.GEMINI_API_KEY !== 'string' || process.env.GEMINI_API_KEY.trim().length === 0) {
+      console.error('GEMINI_API_KEY is empty or invalid')
+      return NextResponse.json(
+        { 
+          error: 'API key is leeg of ongeldig',
+          hint: 'Controleer of GEMINI_API_KEY correct is ingesteld',
+          debug: 'GEMINI_API_KEY exists but is empty or not a string'
+        }, 
+        { status: 500 }
+      )
+    }
+
     // Parse request data
-    const body = await request.json()
+    let body
+    try {
+      body = await request.json()
+    } catch (parseError) {
+      console.error('Failed to parse request JSON:', parseError)
+      return NextResponse.json(
+        { 
+          error: 'Ongeldig request formaat',
+          hint: 'Request body moet geldige JSON zijn',
+          debug: 'JSON parsing failed'
+        }, 
+        { status: 400 }
+      )
+    }
+    
     console.log('Received request body:', body)
     
     const { message, image, images, useGrounding = true, aiModel = 'smart' } = body
@@ -55,7 +82,21 @@ export async function POST(request: NextRequest) {
     const modelName = aiModel === 'pro' ? 'gemini-2.5-pro-preview-06-05' :
                      aiModel === 'smart' ? 'gemini-2.5-flash-preview-05-20' :
                      'gemini-2.0-flash-exp' // internet
-    const model = genAI.getGenerativeModel({ model: modelName })
+    
+    let model
+    try {
+      model = genAI.getGenerativeModel({ model: modelName })
+    } catch (modelError) {
+      console.error('Failed to initialize Gemini model:', modelError)
+      return NextResponse.json(
+        { 
+          error: 'Kan AI model niet initialiseren',
+          hint: 'Controleer of je API key geldig is',
+          debug: `Model initialization failed for ${modelName}`
+        }, 
+        { status: 500 }
+      )
+    }
 
     // Configureer tools array - grounding alleen voor Gemini 2.0 (internet model)
     const tools = (aiModel === 'internet' && useGrounding) ? [googleSearchTool] : []
@@ -174,28 +215,55 @@ export async function POST(request: NextRequest) {
 
     // Return streaming response with proper headers
     return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    })
-
-  } catch (error) {
+      // Send error to client via streaming
+      try {
+        const errorData = JSON.stringify({
+          error: true,
+          message: error instanceof Error ? error.message : 'Streaming error occurred'
+        })
+        
+        controller.enqueue(
+          new TextEncoder().encode(`data: ${errorData}\n\n`)
+        )
+        
+        controller.close()
+      } catch (controllerError) {
+        console.error('Failed to send error via stream:', controllerError)
+        // Controller is already closed, can't send error
+      }
     console.error('Streaming API error:', error)
     
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    // Enhanced error handling with more specific error messages
+    let errorMessage = 'Unknown error'
+    let statusCode = 500
+    
+    if (error instanceof Error) {
+      errorMessage = error.message
+      
+      // Check for specific error types
+      if (error.message.includes('API key')) {
+        statusCode = 401
+        errorMessage = 'API key probleem: ' + error.message
+      } else if (error.message.includes('quota') || error.message.includes('limit')) {
+        statusCode = 429
+        errorMessage = 'API limiet bereikt: ' + error.message
+      } else if (error.message.includes('network') || error.message.includes('fetch')) {
+        statusCode = 503
+        errorMessage = 'Netwerk probleem: ' + error.message
+      }
+    }
     
     return NextResponse.json(
       { 
         error: 'Er is een fout opgetreden bij het verwerken van je bericht',
         details: errorMessage,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        hint: statusCode === 401 ? 'Controleer je GEMINI_API_KEY in environment variables' :
+              statusCode === 429 ? 'Wacht even en probeer opnieuw' :
+              statusCode === 503 ? 'Controleer je internetverbinding' :
+              'Probeer het opnieuw of neem contact op met support'
       },
-      { status: 500 }
+      { status: statusCode }
     )
   }
 } 
