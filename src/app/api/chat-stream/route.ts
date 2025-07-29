@@ -199,38 +199,35 @@ export async function POST(request: NextRequest) {
           console.error('Streaming error:', error)
           
           // Send error to client
-          const errorData = JSON.stringify({
-            error: true,
-            message: error instanceof Error ? error.message : 'Streaming error occurred'
-          })
-          
-          controller.enqueue(
-            new TextEncoder().encode(`data: ${errorData}\n\n`)
-          )
-          
-          controller.close()
+          try {
+            const errorData = JSON.stringify({
+              error: true,
+              message: error instanceof Error ? error.message : 'Streaming error occurred'
+            })
+            
+            controller.enqueue(
+              new TextEncoder().encode(`data: ${errorData}\n\n`)
+            )
+            
+            controller.close()
+          } catch (controllerError) {
+            console.error('Failed to send error via stream:', controllerError)
+            // Controller is already closed, can't send error
+          }
         }
       }
     })
 
     // Return streaming response with proper headers
     return new Response(stream, {
-      // Send error to client via streaming
-      try {
-        const errorData = JSON.stringify({
-          error: true,
-          message: error instanceof Error ? error.message : 'Streaming error occurred'
-        })
-        
-        controller.enqueue(
-          new TextEncoder().encode(`data: ${errorData}\n\n`)
-        )
-        
-        controller.close()
-      } catch (controllerError) {
-        console.error('Failed to send error via stream:', controllerError)
-        // Controller is already closed, can't send error
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
       }
+    })
+
+  } catch (error) {
     console.error('Streaming API error:', error)
     
     // Enhanced error handling with more specific error messages
